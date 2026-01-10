@@ -11,6 +11,8 @@ use crate::state::VulkanState;
 
 mod state;
 
+const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
+
 struct App {
     entry: Entry,
     vk: Option<VulkanState>,
