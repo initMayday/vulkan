@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use ash::Entry;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::EventLoop;
@@ -11,10 +10,7 @@ use crate::state::VulkanState;
 
 mod state;
 
-const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
-
 struct App {
-    entry: Entry,
     vk: Option<VulkanState>,
 
     window: Option<Window>,
@@ -24,18 +20,15 @@ struct App {
 impl App {
     fn new() -> Self {
         Self {
-            entry: Entry::linked(),
             vk: None,
             window: None,
             running: true,
         }
     }
 
-    fn tick(&mut self, _dt: Duration) {
-    }
+    fn tick(&mut self, _dt: Duration) {}
 
-    fn render_frame(&mut self) {
-    }
+    fn render_frame(&mut self) {}
 
     fn cleanup(&mut self) {
         if let Some(vk) = self.vk.take() {
@@ -56,7 +49,7 @@ impl ApplicationHandler for App {
         // Initialize Vulkan once window exists
         if self.vk.is_none() {
             let window = self.window.as_ref().unwrap();
-            self.vk = Some(VulkanState::new(&self.entry, window));
+            self.vk = Some(VulkanState::new(window));
         }
 
         self.running = true;
@@ -80,6 +73,16 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+    let default_filter = if cfg!(debug_assertions) {
+        tracing_subscriber::EnvFilter::new("info")
+    } else {
+        tracing_subscriber::EnvFilter::new("info")
+    };
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or(default_filter);
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
     let mut event_loop = EventLoop::new().unwrap();
     let mut app = App::new();
 
