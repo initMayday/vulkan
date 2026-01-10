@@ -1,9 +1,10 @@
-use ash::{Entry, Instance, ext::debug_utils, vk};
-use std::{
-    ffi::{CStr, CString, c_void},
-    ptr,
+use ash::{
+    Entry, Instance,
+    ext::debug_utils,
+    vk::{self, PhysicalDevice},
 };
-use tracing::{Level, debug, error, event, info, warn};
+use std::ffi::{CStr, CString, c_void};
+use tracing::{error, info, warn};
 use winit::{raw_window_handle::HasDisplayHandle, window::Window};
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -12,6 +13,7 @@ const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
 pub struct VulkanState {
     entry: Entry,
     instance: Instance,
+    device: PhysicalDevice,
 
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
@@ -123,9 +125,11 @@ impl VulkanState {
                 .expect("vkCreateInstance")
         };
 
+        let device = Self::pick_device(&instance);
         let mut ret = Self {
             entry,
             instance,
+            device,
             debug_utils: None,
             debug_messenger: None,
         };
@@ -139,6 +143,26 @@ impl VulkanState {
         }
 
         return ret;
+    }
+
+    fn pick_device(instance: &Instance) -> PhysicalDevice {
+        let physical_devices = unsafe {
+            instance
+                .enumerate_physical_devices()
+                .expect("Failed to enumerate physical devices")
+        };
+
+        for device in physical_devices {
+            let properties = unsafe { instance.get_physical_device_properties(device) };
+            let features = unsafe { instance.get_physical_device_features(device) };
+
+            // Remove this in future, and do ranking instead
+            let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
+            let has_geometry_shader = features.geometry_shader == vk::TRUE;
+            if is_discrete && has_geometry_shader { return device; }
+        }
+
+        panic!("Failed to find a suitable physical device!");
     }
 
     // Load the debug messenger into vulkan / attach the callback
