@@ -11,7 +11,7 @@ const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
 const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
 
 struct QueueFamilyIndices {
-    pub graphics_family: Option<usize>,
+    pub graphics_family: Option<u32>,
 }
 
 impl QueueFamilyIndices {
@@ -85,7 +85,29 @@ extern "system" fn vulkan_debug_callback(
 impl VulkanState {
     pub fn new(window: &Window) -> Self {
         let entry = Entry::linked();
+        let instance = Self::create_instance(&entry, window);
+        let physical_device = Self::pick_physical_device(&instance);
 
+        let mut ret = Self {
+            entry,
+            instance,
+            physical_device,
+            debug_utils: None,
+            debug_messenger: None,
+        };
+
+        if ENABLE_VALIDATION_LAYERS {
+            // THis creates a vulkan object that it keeps, we just
+            // get a handle to it, which is why we need to do this again,
+            // the previous debug_create_info is dropped because vulkan
+            // doesn't own the object
+            ret.setup_debug_messenger();
+        }
+
+        return ret;
+    }
+
+    fn create_instance(entry: &Entry, window: &Window) -> Instance {
         if ENABLE_VALIDATION_LAYERS {
             if !Self::check_validation_layers(&entry) {
                 panic!("Did not support all validation layers!");
@@ -137,24 +159,7 @@ impl VulkanState {
                 .expect("vkCreateInstance")
         };
 
-        let physical_device = Self::pick_physical_device(&instance);
-        let mut ret = Self {
-            entry,
-            instance,
-            physical_device,
-            debug_utils: None,
-            debug_messenger: None,
-        };
-
-        if ENABLE_VALIDATION_LAYERS {
-            // THis creates a vulkan object that it keeps, we just
-            // get a handle to it, which is why we need to do this again,
-            // the previous debug_create_info is dropped because vulkan
-            // doesn't own the object
-            ret.setup_debug_messenger();
-        }
-
-        return ret;
+        return instance;
     }
 
     fn pick_physical_device(instance: &Instance) -> PhysicalDevice {
@@ -197,7 +202,7 @@ impl VulkanState {
             unsafe { instance.get_physical_device_queue_family_properties(device) };
         for (i, queue_family) in queue_families.iter().enumerate() {
             if queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-                indices.graphics_family = Some(i);
+                indices.graphics_family = Some(i as u32);
             }
 
             if indices.is_complete() {
@@ -206,6 +211,16 @@ impl VulkanState {
         }
 
         return indices;
+    }
+
+    fn create_logical_device(instance: &Instance, device: PhysicalDevice) {
+        let indicies = Self::find_queue_families(instance, device);
+
+        let queue_priorities = [1.0_f32];
+
+        let queue_create_info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(indicies.graphics_family.unwrap())
+            .queue_priorities(&queue_priorities);
     }
 
     // Load the debug messenger into vulkan / attach the callback
