@@ -10,10 +10,20 @@ use winit::{raw_window_handle::HasDisplayHandle, window::Window};
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
 const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
 
+struct QueueFamilyIndices {
+    pub graphics_family: Option<usize>,
+}
+
+impl QueueFamilyIndices {
+    pub fn is_complete(&self) -> bool {
+        return self.graphics_family.is_some();
+    }
+}
+
 pub struct VulkanState {
     entry: Entry,
     instance: Instance,
-    device: PhysicalDevice,
+    physical_device: PhysicalDevice,
 
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
@@ -66,6 +76,8 @@ extern "system" fn vulkan_debug_callback(
             }
         }
 
+        // vk::True means abort program, vk::False, means continue, but just log
+        // in future it may be better to abort on errors
         vk::FALSE
     }
 }
@@ -125,11 +137,11 @@ impl VulkanState {
                 .expect("vkCreateInstance")
         };
 
-        let device = Self::pick_device(&instance);
+        let physical_device = Self::pick_physical_device(&instance);
         let mut ret = Self {
             entry,
             instance,
-            device,
+            physical_device,
             debug_utils: None,
             debug_messenger: None,
         };
@@ -145,7 +157,7 @@ impl VulkanState {
         return ret;
     }
 
-    fn pick_device(instance: &Instance) -> PhysicalDevice {
+    fn pick_physical_device(instance: &Instance) -> PhysicalDevice {
         let physical_devices = unsafe {
             instance
                 .enumerate_physical_devices()
@@ -153,16 +165,47 @@ impl VulkanState {
         };
 
         for device in physical_devices {
-            let properties = unsafe { instance.get_physical_device_properties(device) };
-            let features = unsafe { instance.get_physical_device_features(device) };
-
-            // Remove this in future, and do ranking instead
-            let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
-            let has_geometry_shader = features.geometry_shader == vk::TRUE;
-            if is_discrete && has_geometry_shader { return device; }
+            if Self::is_physical_device_suitable(instance, device) {
+                return device;
+            }
         }
 
         panic!("Failed to find a suitable physical device!");
+    }
+
+    fn is_physical_device_suitable(instance: &Instance, device: PhysicalDevice) -> bool {
+        let indices = Self::find_queue_families(instance, device);
+
+        // Additional stuff we could do later on
+        // let properties = unsafe { instance.get_physical_device_properties(device) };
+        // let features = unsafe { instance.get_physical_device_features(device) };
+        // let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
+        // let has_geometry_shader = features.geometry_shader == vk::TRUE;
+        // if is_discrete && has_geometry_shader {
+        //     return device;
+        // }
+
+        return indices.is_complete();
+    }
+
+    fn find_queue_families(instance: &Instance, device: PhysicalDevice) -> QueueFamilyIndices {
+        let mut indices = QueueFamilyIndices {
+            graphics_family: None,
+        };
+
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(device) };
+        for (i, queue_family) in queue_families.iter().enumerate() {
+            if queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                indices.graphics_family = Some(i);
+            }
+
+            if indices.is_complete() {
+                break;
+            }
+        }
+
+        return indices;
     }
 
     // Load the debug messenger into vulkan / attach the callback
