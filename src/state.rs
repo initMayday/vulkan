@@ -1,7 +1,5 @@
 use ash::{
-    Entry, Instance,
-    ext::debug_utils,
-    vk::{self, PhysicalDevice},
+    Device, Entry, Instance, ext::debug_utils, vk::{self, PhysicalDevice, Queue}
 };
 use std::ffi::{CStr, CString, c_void};
 use tracing::{error, info, warn};
@@ -24,6 +22,9 @@ pub struct VulkanState {
     entry: Entry,
     instance: Instance,
     physical_device: PhysicalDevice,
+    logical_device: Device,
+
+    graphics_queue: Queue,
 
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
@@ -87,11 +88,14 @@ impl VulkanState {
         let entry = Entry::linked();
         let instance = Self::create_instance(&entry, window);
         let physical_device = Self::pick_physical_device(&instance);
+        let (logical_device, graphics_queue) = Self::create_logical_device(&instance, physical_device);
 
         let mut ret = Self {
             entry,
             instance,
             physical_device,
+            logical_device,
+            graphics_queue,
             debug_utils: None,
             debug_messenger: None,
         };
@@ -213,14 +217,30 @@ impl VulkanState {
         return indices;
     }
 
-    fn create_logical_device(instance: &Instance, device: PhysicalDevice) {
-        let indicies = Self::find_queue_families(instance, device);
+    fn create_logical_device(instance: &Instance, physical_device: PhysicalDevice) -> (Device, Queue) {
+        let indicies = Self::find_queue_families(instance, physical_device);
+        let graphics_index = indicies.graphics_family.unwrap();
 
         let queue_priorities = [1.0_f32];
 
         let queue_create_info = vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(indicies.graphics_family.unwrap())
+            .queue_family_index(graphics_index)
             .queue_priorities(&queue_priorities);
+
+        let device_features = vk::PhysicalDeviceFeatures::default();
+        let device_create_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(std::slice::from_ref(&queue_create_info))
+            .enabled_features(&device_features);
+
+        let device = unsafe {
+            instance
+                .create_device(physical_device, &device_create_info, None)
+                .expect("Failed to create logical device")
+        };
+
+        let graphics_queue = unsafe { device.get_device_queue(graphics_index, 0) };
+
+        return (device, graphics_queue);
     }
 
     // Load the debug messenger into vulkan / attach the callback
