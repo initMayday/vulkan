@@ -1,20 +1,25 @@
 use ash::{
-    Device, Entry, Instance, ext::debug_utils, vk::{self, PhysicalDevice, Queue}
+    Device, Entry, Instance, ext, khr,
+    vk::{self, PhysicalDevice, Queue, SurfaceKHR},
 };
 use std::ffi::{CStr, CString, c_void};
 use tracing::{error, info, warn};
-use winit::{raw_window_handle::HasDisplayHandle, window::Window};
+use winit::{
+    raw_window_handle::{HasDisplayHandle, HasWindowHandle},
+    window::Window,
+};
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
 const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
 
 struct QueueFamilyIndices {
     pub graphics_family: Option<u32>,
+    pub present_family: Option<u32>,
 }
 
 impl QueueFamilyIndices {
     pub fn is_complete(&self) -> bool {
-        return self.graphics_family.is_some();
+        return self.graphics_family.is_some() && self.present_family.is_some();
     }
 }
 
@@ -25,8 +30,12 @@ pub struct VulkanState {
     logical_device: Device,
 
     graphics_queue: Queue,
+    present_queue: Queue,
 
-    debug_utils: Option<ash::ext::debug_utils::Instance>,
+    surface: SurfaceKHR,
+    surface_loader: khr::surface::Instance,
+
+    debug_utils_loader: Option<ext::debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
 
@@ -87,16 +96,24 @@ impl VulkanState {
     pub fn new(window: &Window) -> Self {
         let entry = Entry::linked();
         let instance = Self::create_instance(&entry, window);
-        let physical_device = Self::pick_physical_device(&instance);
-        let (logical_device, graphics_queue) = Self::create_logical_device(&instance, physical_device);
+        let (surface, surface_loader) = Self::create_surface(&entry, &instance, window);
+        let physical_device = Self::pick_physical_device(&instance, surface, &surface_loader);
+        let (logical_device, graphics_queue, present_queue) =
+            Self::create_logical_device(&instance, physical_device, surface, &surface_loader);
 
         let mut ret = Self {
             entry,
             instance,
             physical_device,
             logical_device,
+
             graphics_queue,
-            debug_utils: None,
+            present_queue,
+
+            surface,
+            surface_loader,
+
+            debug_utils_loader: None,
             debug_messenger: None,
         };
 
@@ -166,7 +183,11 @@ impl VulkanState {
         return instance;
     }
 
-    fn pick_physical_device(instance: &Instance) -> PhysicalDevice {
+    fn pick_physical_device(
+        instance: &Instance,
+        surface: SurfaceKHR,
+        surface_loader: &khr::surface::Instance,
+    ) -> PhysicalDevice {
         let physical_devices = unsafe {
             instance
                 .enumerate_physical_devices()
@@ -174,7 +195,7 @@ impl VulkanState {
         };
 
         for device in physical_devices {
-            if Self::is_physical_device_suitable(instance, device) {
+            if Self::is_physical_device_suitable(instance, device, surface, surface_loader) {
                 return device;
             }
         }
@@ -182,8 +203,13 @@ impl VulkanState {
         panic!("Failed to find a suitable physical device!");
     }
 
-    fn is_physical_device_suitable(instance: &Instance, device: PhysicalDevice) -> bool {
-        let indices = Self::find_queue_families(instance, device);
+    fn is_physical_device_suitable(
+        instance: &Instance,
+        device: PhysicalDevice,
+        surface: SurfaceKHR,
+        surface_loader: &khr::surface::Instance,
+    ) -> bool {
+        let indices = Self::find_queue_families(instance, device, surface, surface_loader);
 
         // Additional stuff we could do later on
         // let properties = unsafe { instance.get_physical_device_properties(device) };
@@ -197,16 +223,32 @@ impl VulkanState {
         return indices.is_complete();
     }
 
-    fn find_queue_families(instance: &Instance, device: PhysicalDevice) -> QueueFamilyIndices {
+    fn find_queue_families(
+        instance: &Instance,
+        device: PhysicalDevice,
+        surface: SurfaceKHR,
+        surface_loader: &khr::surface::Instance,
+    ) -> QueueFamilyIndices {
         let mut indices = QueueFamilyIndices {
             graphics_family: None,
+            present_family: None,
         };
 
         let queue_families =
             unsafe { instance.get_physical_device_queue_family_properties(device) };
+
         for (i, queue_family) in queue_families.iter().enumerate() {
             if queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 indices.graphics_family = Some(i as u32);
+            }
+
+            let present_support = unsafe {
+                surface_loader
+                    .get_physical_device_surface_support(device, i as u32, surface)
+                    .unwrap()
+            };
+            if present_support {
+                indices.present_family = Some(i as u32);
             }
 
             if indices.is_complete() {
@@ -217,19 +259,36 @@ impl VulkanState {
         return indices;
     }
 
-    fn create_logical_device(instance: &Instance, physical_device: PhysicalDevice) -> (Device, Queue) {
-        let indicies = Self::find_queue_families(instance, physical_device);
+    fn create_logical_device(
+        instance: &Instance,
+        physical_device: PhysicalDevice,
+        surface: SurfaceKHR,
+        surface_loader: &khr::surface::Instance,
+    ) -> (Device, Queue, Queue) {
+        let indicies =
+            Self::find_queue_families(instance, physical_device, surface, surface_loader);
+
         let graphics_index = indicies.graphics_family.unwrap();
+        let present_index = indicies.present_family.unwrap();
+
+        let mut vec = vec![graphics_index, present_index];
+        vec.dedup(); // The queue families are sometimes the same
 
         let queue_priorities = [1.0_f32];
 
-        let queue_create_info = vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(graphics_index)
-            .queue_priorities(&queue_priorities);
+        let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = vec
+            .iter()
+            .copied()
+            .map(|family_index| {
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(family_index)
+                    .queue_priorities(&queue_priorities) // request 1 queue from this family
+            })
+            .collect();
 
         let device_features = vk::PhysicalDeviceFeatures::default();
         let device_create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(std::slice::from_ref(&queue_create_info))
+            .queue_create_infos(&queue_create_infos)
             .enabled_features(&device_features);
 
         let device = unsafe {
@@ -239,20 +298,42 @@ impl VulkanState {
         };
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_index, 0) };
+        let present_queue = unsafe { device.get_device_queue(present_index, 0) };
 
-        return (device, graphics_queue);
+        return (device, graphics_queue, present_queue);
+    }
+
+    // Returns the window surface, and the surface loader
+    fn create_surface(
+        entry: &Entry,
+        instance: &Instance,
+        window: &Window,
+    ) -> (SurfaceKHR, khr::surface::Instance) {
+        return (
+            unsafe {
+                ash_window::create_surface(
+                    entry,
+                    instance,
+                    window.display_handle().unwrap().as_raw(),
+                    window.window_handle().unwrap().as_raw(),
+                    None,
+                )
+                .expect("Unable to create surface")
+            },
+            ash::khr::surface::Instance::new(entry, instance),
+        );
     }
 
     // Load the debug messenger into vulkan / attach the callback
     fn setup_debug_messenger(&mut self) {
-        let debug_utils_loader = debug_utils::Instance::new(&self.entry, &self.instance);
+        let debug_utils_loader = ext::debug_utils::Instance::new(&self.entry, &self.instance);
 
         let create_info = debug_messenger_create_info!();
 
         let messenger = unsafe {
             debug_utils_loader
                 .create_debug_utils_messenger(&create_info, None)
-                .expect("create_debug_utils_messenger")
+                .expect("create_debug_utils_loader_messenger")
         };
 
         assert!(
@@ -260,7 +341,7 @@ impl VulkanState {
             "debug messenger is null"
         );
 
-        self.debug_utils = Some(debug_utils_loader);
+        self.debug_utils_loader = Some(debug_utils_loader);
         self.debug_messenger = Some(messenger);
     }
 
@@ -310,11 +391,15 @@ impl VulkanState {
 
     pub fn destroy(self) {
         unsafe {
+            self.logical_device.destroy_device(None);
+
             if ENABLE_VALIDATION_LAYERS {
-                self.debug_utils
+                self.debug_utils_loader
                     .unwrap()
                     .destroy_debug_utils_messenger(self.debug_messenger.unwrap(), None);
             }
+
+            self.surface_loader.destroy_surface(self.surface, None);
 
             self.instance.destroy_instance(None);
         }
