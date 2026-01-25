@@ -2,7 +2,10 @@ use ash::{
     Device, Entry, Instance, ext, khr,
     vk::{self, PhysicalDevice, Queue, SurfaceKHR},
 };
-use std::ffi::{CStr, CString, c_void};
+use std::{
+    ffi::{CStr, CString, c_void},
+    os::raw::c_char,
+};
 use tracing::{error, info, warn};
 use winit::{
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
@@ -10,7 +13,14 @@ use winit::{
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
-const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
+const VALIDATION_LAYERS: [&CStr; 1] = unsafe {
+    [CStr::from_bytes_with_nul_unchecked(
+        b"VK_LAYER_KHRONOS_validation\0",
+    )]
+};
+// const VALIDATION_LAYERS: [&str; 1] = ["VK_LAYER_KHRONOS_validation"];
+
+const DEVICE_EXTENSIONS: [*const c_char; 1] = [ash::khr::swapchain::NAME.as_ptr()];
 
 struct QueueFamilyIndices {
     pub graphics_family: Option<u32>,
@@ -21,6 +31,12 @@ impl QueueFamilyIndices {
     pub fn is_complete(&self) -> bool {
         return self.graphics_family.is_some() && self.present_family.is_some();
     }
+}
+
+struct SwapChainSupportDetails {
+    pub capabilities: vk::SurfaceCapabilitiesKHR,
+    pub formats: Vec<vk::SurfaceFormatKHR>,
+    pub present_modes: Vec<vk::PresentModeKHR>,
 }
 
 pub struct VulkanState {
@@ -149,16 +165,11 @@ impl VulkanState {
         // handle is actually an enum specifying wayland
         let extension_names = Self::get_required_extensions(window);
 
-        let layer_cstrings: Vec<CString> = if ENABLE_VALIDATION_LAYERS {
-            VALIDATION_LAYERS
-                .iter()
-                .map(|s| CString::new(*s).unwrap())
-                .collect()
+        let layer_name_ptrs: Vec<*const i8> = if ENABLE_VALIDATION_LAYERS {
+            VALIDATION_LAYERS.iter().map(|s| s.as_ptr()).collect()
         } else {
             Vec::new()
         };
-
-        let layer_name_ptrs: Vec<*const i8> = layer_cstrings.iter().map(|s| s.as_ptr()).collect();
 
         // Options for the instance
         let mut debug_create_info = debug_messenger_create_info!();
@@ -210,17 +221,41 @@ impl VulkanState {
         surface_loader: &khr::surface::Instance,
     ) -> bool {
         let indices = Self::find_queue_families(instance, device, surface, surface_loader);
+        if indices.is_complete() == false { return false }
 
-        // Additional stuff we could do later on
-        // let properties = unsafe { instance.get_physical_device_properties(device) };
-        // let features = unsafe { instance.get_physical_device_features(device) };
-        // let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
-        // let has_geometry_shader = features.geometry_shader == vk::TRUE;
-        // if is_discrete && has_geometry_shader {
-        //     return device;
-        // }
+        let extensions_supported: bool =
+            Self::check_physical_device_extension_support(instance, device);
+        if extensions_supported == false { return false; }
 
-        return indices.is_complete();
+        let swap_chain_details = Self::query_swap_chain_support(device, surface, surface_loader);
+        let swap_chain_adequate = !swap_chain_details.formats.is_empty() && !swap_chain_details.present_modes.is_empty();
+
+
+        return swap_chain_adequate;
+    }
+
+    fn check_physical_device_extension_support(
+        instance: &Instance,
+        device: PhysicalDevice,
+    ) -> bool {
+        let available: Vec<vk::ExtensionProperties> = unsafe {
+            instance
+                .enumerate_device_extension_properties(device)
+                .expect("Unable to enumerate device extensions")
+        };
+
+        for required in DEVICE_EXTENSIONS {
+            let required = unsafe { CStr::from_ptr(required) };
+
+            let found = available.iter().any(|extension| unsafe {
+                CStr::from_ptr(extension.extension_name.as_ptr()) == required
+            });
+            if found == false {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     fn find_queue_families(
@@ -289,6 +324,7 @@ impl VulkanState {
         let device_features = vk::PhysicalDeviceFeatures::default();
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
+            .enabled_extension_names(&DEVICE_EXTENSIONS)
             .enabled_features(&device_features);
 
         let device = unsafe {
@@ -301,6 +337,27 @@ impl VulkanState {
         let present_queue = unsafe { device.get_device_queue(present_index, 0) };
 
         return (device, graphics_queue, present_queue);
+    }
+
+    fn query_swap_chain_support(
+        device: PhysicalDevice,
+        surface: SurfaceKHR,
+        surface_loader: &khr::surface::Instance,
+    ) -> SwapChainSupportDetails {
+        let capabilities = unsafe {
+            surface_loader.get_physical_device_surface_capabilities(device, surface)
+                .expect("Could not get surface capabilites")
+        };
+
+        let formats = unsafe {
+            surface_loader.get_physical_device_surface_formats(device, surface).expect("Could not get surface formats")
+        };
+
+        let present_modes = unsafe {
+            surface_loader.get_physical_device_surface_present_modes(device, surface).expect("Could not get present modes")
+        };
+
+        SwapChainSupportDetails { capabilities, formats, present_modes }
     }
 
     // Returns the window surface, and the surface loader
@@ -371,9 +428,7 @@ impl VulkanState {
             let mut found = false;
 
             for layer in &available_layers {
-                let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) }
-                    .to_str()
-                    .unwrap_or("none utf8");
+                let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
 
                 if name == required_layer {
                     found = true;
@@ -382,7 +437,10 @@ impl VulkanState {
             }
 
             if !found {
-                error!("Validation layer {} is not supported", required_layer);
+                error!(
+                    "Validation layer {} is not supported",
+                    required_layer.to_string_lossy()
+                );
                 return false;
             }
         }
